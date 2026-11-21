@@ -17,14 +17,55 @@
 // Node 22, standard library only, no network: it reads one file from its
 // own directory and writes one file out. Deterministic — two runs write
 // the same bytes.
-// Run locally: mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
+// Before copying, it validates the image (exists, non-empty, PNG signature,
+// at most 1 MiB, and the pinned sha256) and re-checks the written file, so
+// a corrupted or swapped entry.png fails loudly instead of being submitted
+// silently. Run locally: mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 
-import { copyFileSync, mkdirSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// The exact image this program places. Pinned so a corrupted or swapped
+// entry.png fails loudly instead of being submitted silently.
+const EXPECTED_SHA256 =
+  '940328bc1a30a7cc83bc9336b046b7876f40f06d4196b4d26d10cdcafd6d8516';
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const MAX_BYTES = 1024 * 1024; // quest limit: image at most 1 MiB
+
+function fail(message: string): never {
+  throw new Error(`entry check failed: ${message}`);
+}
+
+function sha256(bytes: Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
 const here = dirname(fileURLToPath(import.meta.url));
 const outDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+const src = join(here, 'entry.png');
+const dest = join(outDir, 'entry.png');
+
+if (!existsSync(src)) fail(`entry.png not found beside main.ts (${src})`);
+const bytes = readFileSync(src);
+if (bytes.length === 0) fail('entry.png is empty');
+if (bytes.length > MAX_BYTES) {
+  fail(`entry.png is ${bytes.length} bytes, over the 1 MiB limit`);
+}
+if (!bytes.subarray(0, 8).equals(PNG_SIGNATURE)) {
+  fail('entry.png does not start with the PNG signature');
+}
+const digest = sha256(bytes);
+if (digest !== EXPECTED_SHA256) {
+  fail(`entry.png sha256 mismatch: got ${digest}, expected ${EXPECTED_SHA256}`);
+}
 
 mkdirSync(outDir, { recursive: true });
-copyFileSync(join(here, 'entry.png'), join(outDir, 'entry.png'));
+copyFileSync(src, dest);
+
+const written = readFileSync(dest);
+if (sha256(written) !== digest) {
+  fail('written entry.png does not match the source bytes');
+}
+console.log(`wrote ${dest}: ${written.length} bytes, sha256 ${digest}`);
